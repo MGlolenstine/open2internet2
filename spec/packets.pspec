@@ -1,0 +1,9 @@
+type ServerQueryResponse = container {
+    identifier: u8,
+    body: ServerQueryBody {identifier == 0xFF}
+};
+
+type ServerQueryBody = container{
+    size: u16,
+    data: u16[size],
+};

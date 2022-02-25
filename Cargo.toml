@@ -1,0 +1,30 @@
+[package]
+build = "./build/build.rs"
+edition = "2021"
+name = "open2internet2"
+version = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.55"
+clipboard-ext = "0.2.0"
+get_if_addrs = "0.5.3"
+gtk = {version = "0.4.6", package = "gtk4"}
+igd = "0.12.0"
+native-dialog = {git = "https://github.com/balthild/native-dialog-rs"}
+netstat = "0.7.0"
+protospec = {git = "https://github.com/MGlolenstine/protospec"}
+public-ip = "0.2.2"
+relm4 = "0.4.2"
+relm4-components = "0.4.0"
+relm4-macros = "0.4.2"
+tokio = {version = "1.17.0", features = ["full"]}
+tracing = "0.1.31"
+tracing-subscriber = "0.3.9"
+tracker = "0.1.1"
+
+[build-dependencies]
+proc-macro2 = "1.0.36"
+protospec-build = {git = "https://github.com/MGlolenstine/protospec"}
+quote = "1.0.15"
