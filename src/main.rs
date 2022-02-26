@@ -1,3 +1,4 @@
+// #![windows_subsystem = "windows"]
 #![allow(dead_code)]
 use clipboard_ext::clipboard::ClipboardContext;
 use clipboard_ext::prelude::ClipboardProvider;
@@ -6,6 +7,7 @@ use gtk::{
     traits::{BoxExt, ButtonExt, ComboBoxExt, EntryExt, GridExt, GtkWindowExt, OrientableExt},
     Align, EntryBuffer,
 };
+use mc_server_scanner::packets::ServerQueryResponse;
 use native_dialog::{MessageDialog, MessageType};
 use relm4::*;
 use std::net::IpAddr;
@@ -16,7 +18,10 @@ use utils::{
     port_forwarding::redirect_minecraft_to_a_port,
 };
 
-pub mod packets;
+#[cfg(not(unix))]
+use portforwarder_rs::port_forwarder::Forwarder;
+use std::sync::{Arc, Mutex};
+
 pub mod utils;
 struct AppComponents {
     async_handler: RelmMsgHandler<AsyncHandler, AppModel>,
@@ -28,13 +33,12 @@ impl Components<AppModel> for AppComponents {
             async_handler: RelmMsgHandler::new(parent_model, parent_sender),
         }
     }
-
     fn connect_parent(&mut self, _parent_widgets: &<AppModel as Model>::Widgets) {}
 }
 
 enum AppMsg {
     RescanServers,
-    ServerScanResults(Vec<(String, u16)>),
+    ServerScanResults(Vec<(ServerQueryResponse, u16)>),
     SelectedPort(Option<u16>),
     PortForward,
 }
@@ -47,7 +51,23 @@ struct AppModel {
     external_port: u16,
     internal_ports: Vec<(String, u16)>,
     selected_minecraft_port: Option<u16>,
+    scanning: bool,
+    #[cfg(not(unix))]
+    forwarder: MyForwarder,
 }
+
+#[cfg(not(unix))]
+pub struct MyForwarder(Forwarder);
+
+#[cfg(not(unix))]
+impl PartialEq for MyForwarder {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.network_interface == other.0.network_interface
+    }
+}
+
+#[cfg(not(unix))]
+impl Eq for MyForwarder {}
 
 impl Model for AppModel {
     type Msg = AppMsg;
@@ -60,6 +80,7 @@ impl AppUpdate for AppModel {
         match msg {
             AppMsg::RescanServers => {
                 debug!("Scanning for servers...");
+                self.set_scanning(true);
                 components
                     .async_handler
                     .sender()
@@ -67,8 +88,13 @@ impl AppUpdate for AppModel {
                     .expect("Receiver dropped");
             }
             AppMsg::ServerScanResults(data) => {
+                self.set_scanning(false);
                 debug!("Found {} servers!", data.len());
-                self.set_internal_ports(data.into_iter().collect::<Vec<_>>());
+                self.set_internal_ports(
+                    data.into_iter()
+                        .map(|a| (a.0.motd, a.1))
+                        .collect::<Vec<_>>(),
+                );
             }
             AppMsg::SelectedPort(port) => {
                 self.set_selected_minecraft_port(port);
@@ -76,13 +102,33 @@ impl AppUpdate for AppModel {
             }
             AppMsg::PortForward => {
                 if let IpAddr::V4(local_addr) = self.get_private_ip() {
+                    let local_addr = local_addr.clone();
                     if let Some(selected_minecraft_port) = self.get_selected_minecraft_port() {
-                        if let Err(a) = redirect_minecraft_to_a_port(
-                            *local_addr,
-                            *selected_minecraft_port,
-                            *self.get_external_port(),
-                            *self.get_lease_time(),
-                        ) {
+                        let selected_minecraft_port = selected_minecraft_port.clone();
+                        #[cfg(not(unix))]
+                        let redirect = {
+                            let ports = *self.get_external_port();
+                            let lease = *self.get_lease_time();
+                            let MyForwarder(fwd) = self.get_mut_forwarder();
+                            redirect_minecraft_to_a_port(
+                                #[cfg(not(unix))]
+                                fwd,
+                                local_addr,
+                                selected_minecraft_port,
+                                ports,
+                                lease,
+                            )
+                        };
+                        #[cfg(unix)]
+                        let redirect = {
+                            redirect_minecraft_to_a_port(
+                                local_addr,
+                                *selected_minecraft_port,
+                                *self.get_external_port(),
+                                *self.get_lease_time(),
+                            )
+                        };
+                        if let Err(a) = redirect {
                             MessageDialog::new()
                                 .set_type(MessageType::Error)
                                 .set_title("Error")
@@ -186,9 +232,14 @@ impl Widgets<AppModel, ()> for AppWidgets {
                     //? Buttons
                     attach(0, 5, 1, 1) = &gtk::Button{
                         set_label: "Rescan minecraft instances",
+                        set_visible: watch!(!model.scanning),
                         connect_clicked(sender) => move |_|{
                             send!(sender, AppMsg::RescanServers);
                         }
+                    },
+                     attach(0, 5, 1, 1) = &gtk::Spinner{
+                        set_spinning: true,
+                        set_visible: watch!(model.scanning),
                     },
                     attach(1, 5, 1, 1) = &gtk::Button{
                         set_label: "Start forwarding",
@@ -218,6 +269,8 @@ impl Widgets<AppModel, ()> for AppWidgets {
 }
 
 fn main() {
+    #[cfg(windows)]
+    let _ = ansi_term::enable_ansi_support();
     tracing_subscriber::fmt::init();
     let pub_addr = {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -230,14 +283,29 @@ fn main() {
     };
     if let Some(pub_addr) = pub_addr {
         if let Some(local_addr) = get_local_ip() {
+            #[cfg(not(unix))]
+            let forwarder = if let IpAddr::V4(a) = local_addr {
+                if let Ok(a) = portforwarder_rs::port_forwarder::create_forwarder(a) {
+                    a
+                } else {
+                    error!("Unable to create a forwarder!");
+                    std::process::exit(0);
+                }
+            } else {
+                error!("IPv6 is currently not supported!");
+                std::process::exit(0);
+            };
             let model = AppModel {
                 public_ip: pub_addr,
                 private_ip: local_addr,
                 lease_time: 3600,
                 external_port: 25565,
                 internal_ports: vec![],
-                tracker: 0,
                 selected_minecraft_port: None,
+                scanning: false,
+                #[cfg(not(unix))]
+                forwarder: MyForwarder(forwarder),
+                tracker: 0,
             };
             let relm = RelmApp::new(model);
             relm.run();

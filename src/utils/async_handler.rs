@@ -2,8 +2,8 @@ use relm4::{send, MessageHandler, Sender};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc::Sender as TokioSender;
 
-use crate::utils::server_scanner::scan_ports;
 use crate::{AppModel, AppMsg};
+use mc_server_scanner::scan_ports;
 
 pub struct AsyncHandler {
     _rt: Runtime,
